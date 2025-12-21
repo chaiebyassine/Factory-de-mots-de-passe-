@@ -1,21 +1,10 @@
 """
 ================================================================================
-PARTIE 1 - Code Original du Professeur (Multi-Architecture)
+PARTIE 1 - Génération de texte avec LSTM + Dropout
 ================================================================================
-Génération de texte avec RNN, GRU ou LSTM - Version configurable
-
-OBJECTIFS:
-- Récupérer et traiter les données ✓
-- Apprendre sur ces données avec différentes architectures (RNN, GRU, LSTM)
-- Comparer les performances des différents modèles
-- Évaluer le système IA lors de la phase de génération de texte
-
 USAGE:
-    RNN:  python partie1_original.py --trainEval train --model_type rnn
-    GRU:  python partie1_original.py --trainEval train --model_type gru
-    LSTM: python partie1_original.py --trainEval train --model_type lstm
-    
-    Évaluation: python partie1_original.py --trainEval eval --model_type [rnn/gru/lstm]
+    Entraînement: python partie1_original.py --trainEval train --dropout 0.3
+    Évaluation:   python partie1_original.py --trainEval eval --dropout 0.3
 ================================================================================
 """
 
@@ -84,32 +73,19 @@ def random_training_set(file):
 
 
 def evaluate(decoder, prime_str='A', predict_len=100, temperature=0.8):
-    """
-    Génère du texte à partir d'une chaîne d'amorçage
-    
-    Args:
-        decoder: Le modèle RNN
-        prime_str: Chaîne de départ pour la génération
-        predict_len: Nombre de caractères à générer
-        temperature: Contrôle la créativité (plus bas = plus conservateur)
-    """
+    """Génère du texte à partir d'une chaîne d'amorçage"""
     hidden = decoder.init_hidden()
     prime_input = char_tensor(prime_str).to(device)
     predicted = prime_str
 
-    # Utiliser la chaîne d'amorçage pour construire l'état caché
     for p in range(len(prime_str) - 1):
         _, hidden = decoder(prime_input[p], hidden)
     inp = prime_input[-1]
 
     for p in range(predict_len):
         output, hidden = decoder(inp, hidden)
-
-        # Échantillonnage avec distribution multinomiale
         output_dist = output.data.view(-1).div(temperature).exp()
         top_i = torch.multinomial(output_dist, 1)[0]
-
-        # Ajouter le caractère prédit et l'utiliser comme prochaine entrée
         predicted_char = all_characters[top_i]
         predicted += predicted_char
         inp = char_tensor(predicted_char).to(device)
@@ -125,7 +101,7 @@ def time_since(since):
     return '%dm %ds' % (m, s)
 
 
-def train(inp, target):
+def train(inp, target, clip_grad=0.0):
     """Une étape d'entraînement"""
     hidden = decoder.init_hidden()
     decoder.zero_grad()
@@ -136,67 +112,73 @@ def train(inp, target):
         loss += criterion(output, target[c].unsqueeze(0))
 
     loss.backward()
+    
+    # Gradient Clipping - évite l'explosion des gradients
+    if clip_grad > 0:
+        torch.nn.utils.clip_grad_norm_(decoder.parameters(), clip_grad)
+    
     decoder_optimizer.step()
 
     return loss.item() / chunk_len
 
 
-class RNN(nn.Module):
+class LSTM(nn.Module):
     """
-    Réseau de Neurones Récurrent - Multi-Architecture (RNN, GRU, LSTM)
+    LSTM avec Dropout pour la génération de texte
     
     Architecture:
     - Embedding: Encode les caractères en vecteurs denses
-    - Couche récurrente: RNN, GRU ou LSTM selon le choix
+    - LSTM: Couche récurrente avec dropout entre couches
+    - Dropout: Après la sortie LSTM (avant le décodeur)
     - Linear: Décode vers les probabilités des caractères
     """
     
-    def __init__(self, input_size, hidden_size, output_size, n_layers=1, model_type='gru'):
-        super(RNN, self).__init__()
+    def __init__(self, input_size, hidden_size, output_size, n_layers=2, dropout=0.0):
+        super(LSTM, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
         self.n_layers = n_layers
-        self.model_type = model_type.lower()
+        self.dropout_rate = dropout
 
         # Couche d'embedding
         self.encoder = nn.Embedding(input_size, hidden_size)
         
-        # Couche récurrente selon le type choisi
-        if self.model_type == 'rnn':
-            self.rnn = nn.RNN(hidden_size, hidden_size, n_layers)
-        elif self.model_type == 'gru':
-            self.rnn = nn.GRU(hidden_size, hidden_size, n_layers)
-        elif self.model_type == 'lstm':
-            self.rnn = nn.LSTM(hidden_size, hidden_size, n_layers)
-        else:
-            raise ValueError(f"Type de modèle non supporté: {model_type}. Utilisez 'rnn', 'gru' ou 'lstm'")
+        # LSTM avec dropout entre couches (si n_layers > 1)
+        rnn_dropout = dropout if n_layers > 1 else 0.0
+        self.lstm = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=rnn_dropout)
+        
+        # Dropout après la sortie LSTM (avant le décodeur)
+        self.dropout = nn.Dropout(dropout)
         
         # Couche de décodage
         self.decoder = nn.Linear(hidden_size, output_size)
+        
+        if dropout > 0:
+            print(f"[DROPOUT] Taux: {dropout*100:.0f}% - Appliqué entre couches + avant décodeur")
 
     def forward(self, input, hidden):
         input = self.encoder(input.view(1, -1))
-        output, hidden = self.rnn(input.view(1, 1, -1), hidden)
+        output, hidden = self.lstm(input.view(1, 1, -1), hidden)
+        output = self.dropout(output)
         output = self.decoder(output.view(1, -1))
         return output, hidden
 
     def init_hidden(self):
-        # LSTM utilise un tuple (hidden_state, cell_state)
-        if self.model_type == 'lstm':
-            return (Variable(torch.zeros(self.n_layers, 1, self.hidden_size, device=device)),
-                    Variable(torch.zeros(self.n_layers, 1, self.hidden_size, device=device)))
-        else:
-            return Variable(torch.zeros(self.n_layers, 1, self.hidden_size, device=device))
+        return (Variable(torch.zeros(self.n_layers, 1, self.hidden_size, device=device)),
+                Variable(torch.zeros(self.n_layers, 1, self.hidden_size, device=device)))
 
 
-def training(n_epochs, file):
+def training(n_epochs, file, clip_grad=0.0):
     """Boucle d'entraînement principale"""
     print()
     print('-----------')
     print('|  TRAIN  |')
     print('-----------')
     print()
+    
+    if clip_grad > 0:
+        print(f'[GRADIENT CLIPPING] max_norm = {clip_grad}')
 
     start = time.time()
     all_losses = []
@@ -205,7 +187,7 @@ def training(n_epochs, file):
     print_every = n_epochs / 100
 
     for epoch in range(1, n_epochs + 1):
-        loss = train(*random_training_set(file))
+        loss = train(*random_training_set(file), clip_grad=clip_grad)
         loss_avg += loss
 
         if epoch % print_every == 0:
@@ -249,21 +231,20 @@ if __name__ == '__main__':
                         help="trainingData [path/to/the/data]")
     parser.add_argument("-te", "--trainEval", default='train', type=str,
                         help="trainEval [train, eval]")
-    parser.add_argument("-r", "--run", default="rnnGeneration", type=str,
-                        help="name of the model saved file")
     parser.add_argument("-m", "--model", default='models', type=str,
                         help="model to save (train) or to load (eval) [path/to/the/model]")
     parser.add_argument('--length', default=100, type=int,
                         help="sequence length during eval process [< 1000]")
+    parser.add_argument('--clip', default=0.0, type=float,
+                        help="gradient clipping (0.0 = désactivé, recommandé: 1.0-5.0)")
     parser.add_argument('--num_layers', default=2, type=int,
-                        help="nombre de couches GRU")
-    parser.add_argument('--hidden_size', default=128, type=int,
+                        help="nombre de couches LSTM")
+    parser.add_argument('--hidden_size', default=256, type=int,
                         help="taille de la couche cachée")
-    parser.add_argument('--max_epochs', default=10000, type=int,
+    parser.add_argument('--max_epochs', default=5000, type=int,
                         help="nombre d'époques d'entraînement")
-    parser.add_argument('--model_type', default='gru', type=str,
-                        choices=['rnn', 'gru', 'lstm'],
-                        help="type de modèle: rnn, gru, ou lstm")
+    parser.add_argument('--dropout', default=0.0, type=float,
+                        help="taux de dropout (0.0 à 0.5)")
 
     args = parser.parse_args()
 
@@ -272,12 +253,8 @@ if __name__ == '__main__':
     file = unidecode.unidecode(open(repData, encoding='utf-8').read())
     file_len = len(file)
 
-    # Type de modèle
-    model_type = args.model_type.lower()
-    model_type_upper = model_type.upper()
-
-    # Création du modèle avec le type choisi
-    decoder = RNN(n_characters, args.hidden_size, n_characters, args.num_layers, model_type).to(device)
+    # Création du modèle LSTM
+    decoder = LSTM(n_characters, args.hidden_size, n_characters, args.num_layers, args.dropout).to(device)
     decoder_optimizer = torch.optim.Adam(decoder.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
@@ -286,18 +263,24 @@ if __name__ == '__main__':
     # Affichage d'un échantillon
     print()
     print("=" * 60)
-    print(f"PARTIE 1 - Génération de texte avec {model_type_upper}")
+    print("Génération de texte avec LSTM")
     print("=" * 60)
     print()
     print('Échantillon du texte:')
     print(random_chunk(file))
     print()
     print('Taille du fichier:', file_len, 'caractères')
-    print(f'Modèle: {model_type_upper} avec {args.num_layers} couches, {args.hidden_size} unités cachées')
+    print(f'Modèle: LSTM avec {args.num_layers} couches, {args.hidden_size} unités cachées')
+    if args.dropout > 0:
+        print(f'Dropout: {args.dropout*100:.0f}%')
     print()
 
-    # Nom du fichier modèle (inclut le type de modèle)
-    modelFile = f"{model_type}Generation_{args.num_layers}_{args.hidden_size}.pt"
+    # Nom du fichier modèle
+    if args.dropout > 0:
+        dropout_str = str(int(args.dropout * 100))
+        modelFile = f"lstmGeneration_{args.num_layers}_{args.hidden_size}_dropout{dropout_str}.pt"
+    else:
+        modelFile = f"lstmGeneration_{args.num_layers}_{args.hidden_size}.pt"
 
     # Créer le répertoire models si nécessaire
     if not path.exists(args.model):
@@ -306,7 +289,7 @@ if __name__ == '__main__':
     # Mode entraînement ou évaluation
     if args.trainEval == 'train':
         decoder.train()
-        training(n_epochs, file)
+        training(n_epochs, file, clip_grad=args.clip)
         torch.save(decoder, join(args.model, modelFile))
         print()
         print('Modèle sauvegardé:', join(args.model, modelFile))
