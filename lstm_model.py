@@ -231,7 +231,7 @@ if __name__ == '__main__':
                         help="trainingData [path/to/the/data]")
     parser.add_argument("-te", "--trainEval", default='train', type=str,
                         help="trainEval [train, eval]")
-    parser.add_argument("-m", "--model", default='models', type=str,
+    parser.add_argument("-m", "--model", default='models/lstm', type=str,
                         help="model to save (train) or to load (eval) [path/to/the/model]")
     parser.add_argument('--length', default=100, type=int,
                         help="sequence length during eval process [< 1000]")
