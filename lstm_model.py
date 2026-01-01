@@ -1,301 +1,238 @@
 """
 ================================================================================
-PARTIE 1 - Génération de texte avec LSTM + Dropout
+PARTIE 1 - Génération de texte avec LSTM (Strong Training)
 ================================================================================
 USAGE:
-    Entraînement: python partie1_original.py --trainEval train --dropout 0.3
-    Évaluation:   python partie1_original.py --trainEval eval --dropout 0.3
+    Entraînement:
+        python lstm_model.py --trainEval train --max_epochs 15000 --clip 5.0 --dropout 0.3
+    Évaluation:
+        python lstm_model.py --trainEval eval --length 300
 ================================================================================
 """
 
 import unidecode
 import string
-import random
-import re
-
-from os import listdir, path, makedirs, popen
-from os.path import isdir, isfile, join
-
+import time
+import math
+from os import path, makedirs
+from os.path import join
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
-
-import time, math
-
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
-
 from argparse import ArgumentParser
 
-# Vérification GPU/CPU
-if torch.cuda.is_available():
-    device = torch.device("cuda:0")
-    print('CUDA AVAILABLE')
-else:
-    device = torch.device("cpu")
-    print('ONLY CPU AVAILABLE')
+# ------------------------------------------------------------------
+# Device
+# ------------------------------------------------------------------
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print("DEVICE:", device)
 
-# Tous les caractères imprimables
+# ------------------------------------------------------------------
+# Characters
+# ------------------------------------------------------------------
 all_characters = string.printable
 n_characters = len(all_characters)
 
-# Paramètres par défaut
-chunk_len = 13
-n_epochs = 200000
-print_every = 10
-plot_every = 10
-hidden_size = 512
-n_layers = 3
+# ------------------------------------------------------------------
+# Hyperparameters
+# ------------------------------------------------------------------
 lr = 0.005
 
-
-def random_chunk(file):
-    """Extrait un morceau aléatoire du texte"""
-    start_index = random.randint(0, file_len - chunk_len)
-    end_index = start_index + chunk_len + 1
-    return file[start_index:end_index]
-
-
-def char_tensor(string):
-    """Convertit une chaîne de caractères en tenseur"""
-    tensor = torch.zeros(len(string)).long()
-    for c in range(len(string)):
-        tensor[c] = all_characters.index(string[c])
-    return Variable(tensor)
-
-
-def random_training_set(file):
-    """Génère un couple (entrée, cible) pour l'entraînement"""
-    chunk = random_chunk(file)
-    inp = char_tensor(chunk[:-1]).to(device)
-    target = char_tensor(chunk[1:]).to(device)
-    return inp, target
-
-
-def evaluate(decoder, prime_str='A', predict_len=100, temperature=0.8):
-    """Génère du texte à partir d'une chaîne d'amorçage"""
-    hidden = decoder.init_hidden()
-    prime_input = char_tensor(prime_str).to(device)
-    predicted = prime_str
-
-    for p in range(len(prime_str) - 1):
-        _, hidden = decoder(prime_input[p], hidden)
-    inp = prime_input[-1]
-
-    for p in range(predict_len):
-        output, hidden = decoder(inp, hidden)
-        output_dist = output.data.view(-1).div(temperature).exp()
-        top_i = torch.multinomial(output_dist, 1)[0]
-        predicted_char = all_characters[top_i]
-        predicted += predicted_char
-        inp = char_tensor(predicted_char).to(device)
-
-    return predicted
-
+# ------------------------------------------------------------------
+# Utils
+# ------------------------------------------------------------------
+def char_tensor(s):
+    t = torch.zeros(len(s)).long()
+    for i, ch in enumerate(s):
+        t[i] = all_characters.index(ch)
+    return t.to(device)
 
 def time_since(since):
-    """Calcule le temps écoulé depuis 'since'"""
     s = time.time() - since
     m = math.floor(s / 60)
     s -= m * 60
-    return '%dm %ds' % (m, s)
+    return f"{m}m {int(s)}s"
 
+# ------------------------------------------------------------------
+# Sequential training set (FULL TEXT, ordered)
+# ------------------------------------------------------------------
+def sequential_training_set(text, max_len=3000):
+    inp = char_tensor(text[:-1])
+    target = char_tensor(text[1:])
+    return inp[:max_len], target[:max_len]
 
-def train(inp, target, clip_grad=0.0):
-    """Une étape d'entraînement"""
-    hidden = decoder.init_hidden()
-    decoder.zero_grad()
-    loss = 0
-    
-    for c in range(inp.size(0)):
-        output, hidden = decoder(inp[c], hidden)
-        loss += criterion(output, target[c].unsqueeze(0))
+# ------------------------------------------------------------------
+# Evaluation (text generation)
+# ------------------------------------------------------------------
+def evaluate(model, prime_str, predict_len=300, temperature=0.8):
+    model.eval()
+    hidden = model.init_hidden()
 
-    loss.backward()
-    
-    # Gradient Clipping - évite l'explosion des gradients
-    if clip_grad > 0:
-        torch.nn.utils.clip_grad_norm_(decoder.parameters(), clip_grad)
-    
-    decoder_optimizer.step()
+    prime_input = char_tensor(prime_str)
+    predicted = prime_str
 
-    return loss.item() / chunk_len
+    for i in range(len(prime_str) - 1):
+        _, hidden = model(prime_input[i], hidden)
 
+    inp = prime_input[-1]
 
-class LSTM(nn.Module):
-    """
-    LSTM avec Dropout pour la génération de texte
-    
-    Architecture:
-    - Embedding: Encode les caractères en vecteurs denses
-    - LSTM: Couche récurrente avec dropout entre couches
-    - Dropout: Après la sortie LSTM (avant le décodeur)
-    - Linear: Décode vers les probabilités des caractères
-    """
-    
-    def __init__(self, input_size, hidden_size, output_size, n_layers=2, dropout=0.0):
-        super(LSTM, self).__init__()
-        self.input_size = input_size
+    for _ in range(predict_len):
+        output, hidden = model(inp, hidden)
+        output_dist = output.squeeze().div(temperature).exp()
+        top_i = torch.multinomial(output_dist, 1)[0]
+        char = all_characters[top_i]
+        predicted += char
+        inp = char_tensor(char)
+
+    return predicted
+
+# ------------------------------------------------------------------
+# LSTM Model
+# ------------------------------------------------------------------
+class LSTMModel(nn.Module):
+
+    def __init__(self, input_size, hidden_size, output_size, n_layers=2, dropout=0.3):
+        super().__init__()
         self.hidden_size = hidden_size
-        self.output_size = output_size
         self.n_layers = n_layers
-        self.dropout_rate = dropout
 
-        # Couche d'embedding
         self.encoder = nn.Embedding(input_size, hidden_size)
-        
-        # LSTM avec dropout entre couches (si n_layers > 1)
-        rnn_dropout = dropout if n_layers > 1 else 0.0
-        self.lstm = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=rnn_dropout)
-        
-        # Dropout après la sortie LSTM (avant le décodeur)
+        self.lstm = nn.LSTM(
+            hidden_size,
+            hidden_size,
+            n_layers,
+            dropout=dropout if n_layers > 1 else 0.0
+        )
         self.dropout = nn.Dropout(dropout)
-        
-        # Couche de décodage
         self.decoder = nn.Linear(hidden_size, output_size)
-        
-        if dropout > 0:
-            print(f"[DROPOUT] Taux: {dropout*100:.0f}% - Appliqué entre couches + avant décodeur")
 
-    def forward(self, input, hidden):
-        input = self.encoder(input.view(1, -1))
-        output, hidden = self.lstm(input.view(1, 1, -1), hidden)
+    def forward(self, x, hidden):
+        x = x.view(1, -1)
+        x = self.encoder(x)
+        output, hidden = self.lstm(x, hidden)
         output = self.dropout(output)
         output = self.decoder(output.view(1, -1))
         return output, hidden
 
     def init_hidden(self):
-        return (Variable(torch.zeros(self.n_layers, 1, self.hidden_size, device=device)),
-                Variable(torch.zeros(self.n_layers, 1, self.hidden_size, device=device)))
+        return (
+            torch.zeros(self.n_layers, 1, self.hidden_size, device=device),
+            torch.zeros(self.n_layers, 1, self.hidden_size, device=device),
+        )
 
+# ------------------------------------------------------------------
+# Training step
+# ------------------------------------------------------------------
+def train_step(model, inp, target, optimizer, criterion, clip=5.0):
+    model.train()
+    hidden = model.init_hidden()
+    optimizer.zero_grad()
 
-def training(n_epochs, file, clip_grad=0.0):
-    """Boucle d'entraînement principale"""
-    print()
-    print('-----------')
-    print('|  TRAIN  |')
-    print('-----------')
-    print()
-    
-    if clip_grad > 0:
-        print(f'[GRADIENT CLIPPING] max_norm = {clip_grad}')
+    loss = 0
+    for i in range(inp.size(0)):
+        output, hidden = model(inp[i], hidden)
+        loss += criterion(output, target[i].unsqueeze(0))
 
-    start = time.time()
-    all_losses = []
-    loss_avg = 0
-    best_loss = 100
-    print_every = n_epochs / 100
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+    optimizer.step()
 
-    for epoch in range(1, n_epochs + 1):
-        loss = train(*random_training_set(file), clip_grad=clip_grad)
-        loss_avg += loss
+    return loss.item() / inp.size(0)
 
-        if epoch % print_every == 0:
-            print('[%s (%d %d%%) %.4f (%.4f)]' % (time_since(start), epoch, epoch / n_epochs * 100, loss_avg / epoch, loss))
-
-        if best_loss > (loss_avg / epoch):
-            best_loss = loss_avg / epoch
-            print('[%s (%d %d%%) %.4f (%.4f)]' % (time_since(start), epoch, epoch / n_epochs * 100, loss_avg / epoch, loss))
-
-
-def evaluating(decoder, length):
-    """Mode d'évaluation interactif"""
-    print()
-    print('------------')
-    print('|   EVAL   |')
-    print('------------')
-    print()
-
-    try:
-        while True:
-            print('Enter a starting two or tree charachters')
-            input1 = input()
-            print()
-            if len(input1) > 0:
-                print('Generated ', length, 'charcaters: ')
-                print(evaluate(decoder=decoder, prime_str=input1, predict_len=length, temperature=0.8))
-            else:
-                print(input1, ' length < 1')
-            print('------------')
-            print()
-
-    except KeyboardInterrupt:
-        print("Press Ctrl-C to terminate evaluating")
-        print('------------')
-
-
-if __name__ == '__main__':
+# ------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------
+if __name__ == "__main__":
 
     parser = ArgumentParser()
-    parser.add_argument("-d", "--trainingData", default="data/shakespeare.txt", type=str,
-                        help="trainingData [path/to/the/data]")
-    parser.add_argument("-te", "--trainEval", default='train', type=str,
-                        help="trainEval [train, eval]")
-    parser.add_argument("-m", "--model", default='models/lstm', type=str,
-                        help="model to save (train) or to load (eval) [path/to/the/model]")
-    parser.add_argument('--length', default=100, type=int,
-                        help="sequence length during eval process [< 1000]")
-    parser.add_argument('--clip', default=0.0, type=float,
-                        help="gradient clipping (0.0 = désactivé, recommandé: 1.0-5.0)")
-    parser.add_argument('--num_layers', default=2, type=int,
-                        help="nombre de couches LSTM")
-    parser.add_argument('--hidden_size', default=256, type=int,
-                        help="taille de la couche cachée")
-    parser.add_argument('--max_epochs', default=5000, type=int,
-                        help="nombre d'époques d'entraînement")
-    parser.add_argument('--dropout', default=0.0, type=float,
-                        help="taux de dropout (0.0 à 0.5)")
+    parser.add_argument("--trainingData", default="data/shakespeare.txt")
+    parser.add_argument("--trainEval", default="train", choices=["train", "eval"])
+    # Accept both --model and --model_dir for backward compatibility
+    parser.add_argument("-m", "--model", "--model_dir", dest="model_dir", default="models/lstm",
+                        help="Directory where model files are stored (default: models/lstm)")
+    parser.add_argument("--hidden_size", type=int, default=256)
+    parser.add_argument("--num_layers", type=int, default=2)
+    parser.add_argument("--dropout", type=float, default=0.3)
+    parser.add_argument("--max_epochs", type=int, default=15000)
+    parser.add_argument("--clip", type=float, default=5.0)
+    parser.add_argument("--length", type=int, default=300)
 
     args = parser.parse_args()
 
-    # Chargement des données
-    repData = args.trainingData
-    file = unidecode.unidecode(open(repData, encoding='utf-8').read())
-    file_len = len(file)
+    # Load text
+    text = unidecode.unidecode(open(args.trainingData, encoding="utf-8").read())
+    print("Corpus size:", len(text))
 
-    # Création du modèle LSTM
-    decoder = LSTM(n_characters, args.hidden_size, n_characters, args.num_layers, args.dropout).to(device)
-    decoder_optimizer = torch.optim.Adam(decoder.parameters(), lr=lr)
+    # Model
+    model = LSTMModel(
+        n_characters,
+        args.hidden_size,
+        n_characters,
+        args.num_layers,
+        args.dropout
+    ).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
-    n_epochs = args.max_epochs
+    model_name = f"lstm_{args.num_layers}_{args.hidden_size}.pt"
+    if not path.exists(args.model_dir):
+        makedirs(args.model_dir)
 
-    # Affichage d'un échantillon
-    print()
-    print("=" * 60)
-    print("Génération de texte avec LSTM")
-    print("=" * 60)
-    print()
-    print('Échantillon du texte:')
-    print(random_chunk(file))
-    print()
-    print('Taille du fichier:', file_len, 'caractères')
-    print(f'Modèle: LSTM avec {args.num_layers} couches, {args.hidden_size} unités cachées')
-    if args.dropout > 0:
-        print(f'Dropout: {args.dropout*100:.0f}%')
-    print()
+    # -------------------- TRAIN --------------------
+    if args.trainEval == "train":
+        start = time.time()
+        inp, target = sequential_training_set(text)
 
-    # Nom du fichier modèle
-    if args.dropout > 0:
-        dropout_str = str(int(args.dropout * 100))
-        modelFile = f"lstmGeneration_{args.num_layers}_{args.hidden_size}_dropout{dropout_str}.pt"
+        for epoch in range(1, args.max_epochs + 1):
+            loss = train_step(model, inp, target, optimizer, criterion, args.clip)
+            if epoch % 500 == 0:
+                print(f"[{epoch}/{args.max_epochs}] loss={loss:.4f} time={time_since(start)}")
+
+        torch.save(model, join(args.model_dir, model_name))
+        print("Model saved:", join(args.model_dir, model_name))
+
+    # -------------------- EVAL --------------------
     else:
-        modelFile = f"lstmGeneration_{args.num_layers}_{args.hidden_size}.pt"
+        # Try to locate the model file with a few fallbacks to handle different naming conventions
+        def _find_model_file(model_dir, expected_name):
+            from glob import glob
+            expected_path = join(model_dir, expected_name)
+            if path.exists(expected_path):
+                return expected_path
+            # look for files like 'lstm*_{num_layers}_{hidden}.pt' inside model_dir
+            pattern = join(model_dir, f"lstm*_{args.num_layers}_{args.hidden_size}.pt")
+            matches = glob(pattern)
+            if matches:
+                return matches[0]
+            # look in parent 'models' folder as a last resort
+            parent = path.dirname(model_dir)
+            pattern2 = join(parent, f"lstm*_{args.num_layers}_{args.hidden_size}.pt")
+            matches = glob(pattern2)
+            if matches:
+                return matches[0]
+            return None
 
-    # Créer le répertoire models si nécessaire
-    if not path.exists(args.model):
-        makedirs(args.model)
+        model_path = _find_model_file(args.model_dir, model_name)
+        if model_path is None:
+            raise FileNotFoundError(
+                f"Model file not found: expected {join(args.model_dir, model_name)}.\n"
+                f"Checked {args.model_dir} and its parent directory for matching files."
+            )
+        if model_path != join(args.model_dir, model_name):
+            print("Warning: expected model not found; using alternative file:", model_path)
 
-    # Mode entraînement ou évaluation
-    if args.trainEval == 'train':
-        decoder.train()
-        training(n_epochs, file, clip_grad=args.clip)
-        torch.save(decoder, join(args.model, modelFile))
-        print()
-        print('Modèle sauvegardé:', join(args.model, modelFile))
-    elif args.trainEval == 'eval':
-        decoder = torch.load(join(args.model, modelFile))
-        decoder.eval().to(device)
-        evaluating(decoder, args.length)
-    else:
-        print('Choose trainEval option (--trainEval train/eval')
+        model = torch.load(
+            model_path,
+            map_location=device,
+            weights_only=False
+        )
+
+        start_prompt = input(
+            "\nEnter starting text (letter / word / sentence): "
+        ).strip()
+
+        if len(start_prompt) == 0:
+            start_prompt = "Th"
+
+        print("\nGenerated text:\n")
+        print(evaluate(model, start_prompt, args.length))
