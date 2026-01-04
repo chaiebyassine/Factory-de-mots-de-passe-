@@ -18,6 +18,9 @@ from os import path, makedirs
 from os.path import join
 import torch
 import torch.nn as nn
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from argparse import ArgumentParser
 
 # ------------------------------------------------------------------
@@ -147,7 +150,6 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--trainingData", default="data/shakespeare.txt")
     parser.add_argument("--trainEval", default="train", choices=["train", "eval"])
-    # Accept both --model and --model_dir for backward compatibility
     parser.add_argument("-m", "--model", "--model_dir", dest="model_dir", default="models/lstm",
                         help="Directory where model files are stored (default: models/lstm)")
     parser.add_argument("--hidden_size", type=int, default=256)
@@ -184,46 +186,42 @@ if __name__ == "__main__":
         start = time.time()
         inp, target = sequential_training_set(text)
 
+        epochs_list = []
+        losses_list = []
+
         for epoch in range(1, args.max_epochs + 1):
             loss = train_step(model, inp, target, optimizer, criterion, args.clip)
+
+            epochs_list.append(epoch)
+            losses_list.append(loss)
+
             if epoch % 500 == 0:
                 print(f"[{epoch}/{args.max_epochs}] loss={loss:.4f} time={time_since(start)}")
+
+        # Pandas: save loss history
+        df_loss = pd.DataFrame({
+            "epoch": epochs_list,
+            "loss": losses_list
+        })
+        df_loss.to_csv(join(args.model_dir, "training_loss.csv"), index=False)
+
+        # Matplotlib: plot loss curve
+        plt.figure(figsize=(8, 5))
+        plt.plot(df_loss["epoch"], df_loss["loss"])
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Training Loss Evolution (LSTM)")
+        plt.grid(True)
+        plt.savefig(join(args.model_dir, "training_loss.png"))
+        plt.close()
 
         torch.save(model, join(args.model_dir, model_name))
         print("Model saved:", join(args.model_dir, model_name))
 
     # -------------------- EVAL --------------------
     else:
-        # Try to locate the model file with a few fallbacks to handle different naming conventions
-        def _find_model_file(model_dir, expected_name):
-            from glob import glob
-            expected_path = join(model_dir, expected_name)
-            if path.exists(expected_path):
-                return expected_path
-            # look for files like 'lstm*_{num_layers}_{hidden}.pt' inside model_dir
-            pattern = join(model_dir, f"lstm*_{args.num_layers}_{args.hidden_size}.pt")
-            matches = glob(pattern)
-            if matches:
-                return matches[0]
-            # look in parent 'models' folder as a last resort
-            parent = path.dirname(model_dir)
-            pattern2 = join(parent, f"lstm*_{args.num_layers}_{args.hidden_size}.pt")
-            matches = glob(pattern2)
-            if matches:
-                return matches[0]
-            return None
-
-        model_path = _find_model_file(args.model_dir, model_name)
-        if model_path is None:
-            raise FileNotFoundError(
-                f"Model file not found: expected {join(args.model_dir, model_name)}.\n"
-                f"Checked {args.model_dir} and its parent directory for matching files."
-            )
-        if model_path != join(args.model_dir, model_name):
-            print("Warning: expected model not found; using alternative file:", model_path)
-
         model = torch.load(
-            model_path,
+            join(args.model_dir, model_name),
             map_location=device,
             weights_only=False
         )

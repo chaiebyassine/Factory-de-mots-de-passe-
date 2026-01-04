@@ -18,6 +18,9 @@ from os import path, makedirs
 from os.path import join
 import torch
 import torch.nn as nn
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from argparse import ArgumentParser
 # ------------------------------------------------------------------
 # Device
@@ -173,6 +176,10 @@ def evaluate(model, start="Th", length=300, temperature=0.8):
 # ------------------------------------------------------------------
 if __name__ == "__main__":
 
+
+    # --------------------------------------------------
+    # Lecture des arguments en ligne de commande
+    # --------------------------------------------------
     parser = ArgumentParser()
     parser.add_argument("--trainingData", default="data/shakespeare.txt")
     parser.add_argument("--trainEval", default="train", choices=["train", "eval"])
@@ -186,9 +193,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # --------------------------------------------------
+    # Chargement et normalisation du corpus texte
+    # --------------------------------------------------
     text = unidecode.unidecode(open(args.trainingData, encoding="utf-8").read())
     print("Corpus size:", len(text))
 
+    # --------------------------------------------------
+    # Initialisation du modèle GRU
+    # --------------------------------------------------
     model = GRUModel(
         n_characters,
         args.hidden_size,
@@ -205,40 +218,89 @@ if __name__ == "__main__":
 
     model_name = f"gru_{args.num_layers}_{args.hidden_size}.pt"
 
-    # ---------------- TRAIN ----------------12
+    # ==================================================
+    # MODE ENTRAÎNEMENT
+    # ==================================================
     if args.trainEval == "train":
         start = time.time()
+
+        # ---------------------------------------------
+        # Stockage des métriques (Pandas)
+        # ---------------------------------------------
+        epoch_history = []
+        loss_history = []
+
         for epoch in range(1, args.max_epochs + 1):
+
             inp, target = random_training_set(text)
             loss = train_step(model, inp, target, optimizer, criterion, args.clip)
+
+            epoch_history.append(epoch)
+            loss_history.append(loss)
 
             if epoch % 500 == 0:
                 print(f"[{epoch}/{args.max_epochs}] loss={loss:.4f} time={time_since(start)}")
 
+        # ---------------------------------------------
+        # Sauvegarde du modèle
+        # ---------------------------------------------
         torch.save(model, join(args.model_dir, model_name))
         print("Model saved:", join(args.model_dir, model_name))
 
-    # ---------------- EVAL ----------------
+        # ---------------------------------------------
+        # Sauvegarde CSV (Pandas)
+        # ---------------------------------------------
+        df = pd.DataFrame({
+            "epoch": epoch_history,
+            "loss": loss_history
+        })
+
+        csv_path = join(
+            args.model_dir,
+            f"training_loss_gru_{args.num_layers}_{args.hidden_size}.csv"
+        )
+        df.to_csv(csv_path, index=False)
+        print("CSV saved:", csv_path)
+
+        # ---------------------------------------------
+        # Visualisation (Matplotlib)
+        # ---------------------------------------------
+        plt.figure(figsize=(8, 5))
+        plt.plot(epoch_history, loss_history)
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.title("Training Loss Curve (GRU)")
+        plt.grid(True)
+
+        png_path = join(
+            args.model_dir,
+            f"training_loss_gru_{args.num_layers}_{args.hidden_size}.png"
+        )
+        plt.savefig(png_path)
+        plt.close()
+        print("PNG saved:", png_path)
+
+    # ==================================================
+    # MODE ÉVALUATION / GÉNÉRATION
+    # ==================================================
     else:
         model = torch.load(
-        join(args.model_dir, model_name),
-        map_location=device,
-        weights_only=False
-    )
-    model.eval()
+            join(args.model_dir, model_name),
+            map_location=device,
+            weights_only=False
+        )
+        model.eval()
 
-    print("\n================ TEXT GENERATION (GRU) ================\n")
+        print("\n================ TEXT GENERATION (GRU) ================\n")
 
-    # إدخال من المستخدم
-    start_text = input(
-        "Enter starting text (letter / word / sentence): "
-    ).strip()
+        start_text = input(
+            "Enter starting text (letter / word / sentence): "
+        ).strip()
 
-    # إذا المستخدم ضغط Enter بدون كتابة شيء
-    if len(start_text) == 0:
-        start_text = "Th"
+        if len(start_text) == 0:
+            start_text = "Th"
 
-    print("\nGenerated text:\n")
-    print(evaluate(model, start_text, args.length))
+        print("\nGenerated text:\n")
+        print(evaluate(model, start_text, args.length))
 
-    print("\n======================================================\n")
+        print("\n======================================================\n")

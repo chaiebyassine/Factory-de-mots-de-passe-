@@ -18,6 +18,9 @@ from os import path, makedirs
 from os.path import join
 import torch
 import torch.nn as nn
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from argparse import ArgumentParser
 
 # ------------------------------------------------------------------
@@ -164,6 +167,9 @@ def evaluate(model, start="Th", length=300, temperature=0.8):
 # ------------------------------------------------------------------
 if __name__ == "__main__":
 
+    # --------------------------------------------------
+    # Parsing des arguments (configuration du script)
+    # --------------------------------------------------
     parser = ArgumentParser()
     parser.add_argument("--trainingData", default="data/shakespeare.txt")
     parser.add_argument("--trainEval", default="train", choices=["train", "eval"])
@@ -176,49 +182,100 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # --------------------------------------------------
+    # Chargement et normalisation du corpus texte
+    # --------------------------------------------------
     text = unidecode.unidecode(open(args.trainingData, encoding="utf-8").read())
     print("Corpus size:", len(text))
 
+    # --------------------------------------------------
+    # Initialisation du modèle RNN
+    # --------------------------------------------------
     model = SimpleRNN(
-        n_characters,
-        args.hidden_size,
-        n_characters,
-        args.num_layers
+        n_characters,              # taille du vocabulaire
+        args.hidden_size,           # taille de l'état caché
+        n_characters,              # sortie = vocabulaire
+        args.num_layers             # nombre de couches
     ).to(device)
 
+    # Optimiseur (Adam) et fonction de perte (CrossEntropy)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
+    # Création du dossier de sauvegarde si nécessaire
     if not path.exists(args.model_dir):
         makedirs(args.model_dir)
 
     model_name = f"rnn_{args.num_layers}_{args.hidden_size}.pt"
 
-    # ---------------- TRAIN ----------------
+    # ==================================================
+    # MODE ENTRAÎNEMENT
+    # ==================================================
     if args.trainEval == "train":
         start = time.time()
+
+        # Listes pour stocker l'évolution de la loss
+        epochs_list = []
+        losses_list = []
+
         for epoch in range(1, args.max_epochs + 1):
+
+            # Sélection aléatoire d'un chunk du texte
             inp, target = random_training_set(text)
+
+            # Une étape d'entraînement (forward + backward)
             loss = train_step(model, inp, target, optimizer, criterion, args.clip)
 
+            # Sauvegarde des valeurs pour l'analyse
+            epochs_list.append(epoch)
+            losses_list.append(loss)
+
+            # Affichage périodique de l'avancement
             if epoch % 500 == 0:
                 print(f"[{epoch}/{args.max_epochs}] loss={loss:.4f} time={time_since(start)}")
 
+        # --------------------------------------------------
+        # Pandas : stockage des pertes dans un fichier CSV
+        # --------------------------------------------------
+        df_loss = pd.DataFrame({
+            "epoch": epochs_list,
+            "loss": losses_list
+        })
+        df_loss.to_csv(join(args.model_dir, "training_loss.csv"), index=False)
+
+        # --------------------------------------------------
+        # Matplotlib : visualisation de la convergence
+        # --------------------------------------------------
+        plt.figure(figsize=(8, 5))
+        plt.plot(df_loss["epoch"], df_loss["loss"])
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Training Loss Evolution (Simple RNN)")
+        plt.grid(True)
+        plt.savefig(join(args.model_dir, "training_loss.png"))
+        plt.close()
+
+        # Sauvegarde du modèle entraîné
         torch.save(model, join(args.model_dir, model_name))
         print("Model saved:", join(args.model_dir, model_name))
 
-    # ---------------- EVAL ----------------
+    # ==================================================
+    # MODE ÉVALUATION / GÉNÉRATION
+    # ==================================================
     else:
+        # Chargement du modèle entraîné
         model = torch.load(
             join(args.model_dir, model_name),
             map_location=device,
             weights_only=False
         )
-        model.eval()
+        model.eval()  # mode évaluation (pas de gradient)
 
+        # Texte de départ fourni par l'utilisateur
         start_text = input("Enter starting text: ").strip()
         if len(start_text) == 0:
             start_text = "Th"
 
+        # Génération de texte caractère par caractère
         print("\nGenerated text:\n")
         print(evaluate(model, start_text, args.length))
