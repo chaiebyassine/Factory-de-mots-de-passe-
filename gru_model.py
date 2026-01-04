@@ -4,7 +4,7 @@ PARTIE 1 - Génération de texte avec GRU (Strong & Clean)
 ================================================================================
 USAGE:
     Entraînement:
-        python gru_model.py --trainEval train --max_epochs 8000 --clip 5.0 --dropout 0.3
+        python gru_model.py --trainEval train --max_epochs 20000 --clip 5.0 --dropout 0.3
     Évaluation:
         python gru_model.py --trainEval eval --length 300
 ================================================================================
@@ -32,8 +32,8 @@ n_characters = len(all_characters)
 # ------------------------------------------------------------------
 # Hyperparameters
 # ------------------------------------------------------------------
-lr = 0.005
-chunk_len = 30   # أطول من RNN العادي = تعلم سياق أفضل
+lr = 0.003
+chunk_len = 80   # أطول من RNN العادي = تعلم سياق أفضل
 
 # ------------------------------------------------------------------
 # Utils
@@ -205,7 +205,7 @@ if __name__ == "__main__":
 
     model_name = f"gru_{args.num_layers}_{args.hidden_size}.pt"
 
-    # ---------------- TRAIN ----------------
+    # ---------------- TRAIN ----------------12
     if args.trainEval == "train":
         start = time.time()
         for epoch in range(1, args.max_epochs + 1):
